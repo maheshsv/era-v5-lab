@@ -38,6 +38,12 @@ TASK_LABEL = {
     "truthfulqa_mc2": "TruthfulQA (mc2)",
 }
 
+SOURCE_LABEL = {
+    "qwen2.5_blog": "the Qwen2.5 blog",
+    "qwen2.5_report": "the Qwen2.5 technical report",
+    "smollm2_card": "the SmolLM2 model card (lighteval)",
+}
+
 FIELD_DOCS = {
     "model": "Hugging Face model id as evaluated",
     "model_revision": "commit sha of the model repository that was loaded (pinned with revision=)",
@@ -64,7 +70,30 @@ FIELD_DOCS = {
 }
 
 # Hand-written reasons for compare_v0.md, keyed by (model, task, shots). Keep them short and factual.
-NOTES: dict[tuple[str, str, int], str] = {}
+NOTES: dict[tuple[str, str, int], str] = {
+    ("Qwen/Qwen2.5-0.5B", "truthfulqa_mc2", 0):
+        "lm_eval's fixed 6-example QA prompt and the mc2 metric reproduce Qwen's figure on the full 817 questions",
+    ("Qwen/Qwen2.5-1.5B", "truthfulqa_mc2", 0):
+        "same prompt and metric; the match to one decimal on both Qwen models says Qwen reports mc2 with this prompt",
+    ("HuggingFaceTB/SmolLM2-1.7B", "arc_average", 0):
+        "mean of ARC-Easy 73.3 and ARC-Challenge 47.4 (acc_norm); lighteval (card) and lm_eval agree",
+    ("Qwen/Qwen2.5-1.5B", "arc_average", 0):
+        "against the SmolLM2 card's own lighteval run of this model (58.5); Qwen does not publish 0-shot ARC",
+    ("Qwen/Qwen2.5-0.5B", "arc_challenge", 0):
+        "0-shot here versus Qwen's 25-shot. The 25-shot full run on this model is the matched comparison (see its row)",
+    ("Qwen/Qwen2.5-0.5B", "gsm8k", 5):
+        "5-shot here versus Qwen's 4-shot; strict-match (32.4) and flexible-extract (33.0) agree, so the answer format "
+        "is followed. The 4-shot full run on this model is the matched comparison (see its row)",
+    ("Qwen/Qwen2.5-1.5B", "gsm8k", 5):
+        "against the SmolLM2 card's lighteval 5-shot run of this model (61.3); Qwen itself publishes 4-shot only (68.5, "
+        "see the 4-shot row)",
+    ("HuggingFaceTB/SmolLM2-1.7B", "gsm8k", 5):
+        "same 5-shot setting as the card; lm_eval's Question/Answer prompt with flexible-extract reproduces the lighteval "
+        "figure within one standard error",
+    ("Qwen/Qwen2.5-1.5B", "arc_challenge", 0):
+        "0-shot here versus Qwen's 25-shot; 25 shots are worth about 9 points to this model. A 25-shot full run on the "
+        "1.5B is ~4 h on the M2 Pro and was not done; it is one `--num-fewshot 25` call on a CUDA GPU",
+}
 GENERAL_NOTES: list[str] = []
 
 # What the limited mini-profile table (Table 3) does and does not say. Rendered under it.
@@ -222,24 +251,46 @@ def scores_table(records: list[dict], models: list[str], profile: str) -> str:
     return table(header, rows)
 
 
-def published_for(published: dict, model: str, task: str) -> dict | None:
-    return published["models"].get(model, {}).get("scores", {}).get(task)
+def published_for(published: dict, model: str, task: str, shots: int | None = None) -> dict | None:
+    """The published score to compare a record against.
+
+    Prefer a score measured at the same shot count, whether by the model's authors or by a third party; otherwise
+    the authors' score (the row is then marked 'setting differs'); otherwise a third party's.
+    """
+    entry = published["models"].get(model, {})
+    candidates = []
+    own = entry.get("scores", {}).get(task)
+    if own is not None:
+        candidates.append({**own, "by": "authors"})
+    third = entry.get("third_party", {}).get("scores", {}).get(task)
+    if third is not None:
+        candidates.append({**third, "by": entry["third_party"]["source"]})
+    if not candidates:
+        return None
+    matching = [c for c in candidates if shots is not None and c.get("shots") == shots]
+    return (matching or candidates)[0]
 
 
 def verdict(record: dict, pub: dict | None) -> tuple[str, str, float | None]:
-    """(verdict text, setting note, diff in points) for one of our records against a published score."""
+    """(verdict, setting note, diff in points) for one of our records against a published score.
+
+    A within/outside verdict is given only when our shot count equals the publisher's; otherwise the row is
+    'setting differs' and the diff is shown for the size of the shot effect, not as a pass/fail.
+    """
     if pub is None:
         return "no published score", "", None
     diff = 100 * record["value"] - pub["value"]
     notes = []
-    if pub.get("shots") is not None and pub["shots"] != record["num_fewshot"]:
-        notes.append(f"shots {record['num_fewshot']} vs {pub['shots']} published")
+    if pub["by"] != "authors":
+        notes.append(f"measured by {SOURCE_LABEL.get(pub['by'], pub['by'])}, not by the model authors")
     if record["limit"] is not None:
         notes.append(f"limited run (n={record['n_items']})")
     if pub.get("metric") is None:
-        notes.append("published metric variant not stated")
-    within = abs(diff) <= WITHIN_POINTS
-    return ("within 2" if within else "outside 2"), "; ".join(notes), diff
+        notes.append("metric variant not stated by publisher")
+    if pub.get("shots") is not None and pub["shots"] != record["num_fewshot"]:
+        notes.insert(0, f"shots {record['num_fewshot']} vs {pub['shots']} published")
+        return "setting differs", "; ".join(notes), diff
+    return ("within 2" if abs(diff) <= WITHIN_POINTS else "outside 2"), "; ".join(notes), diff
 
 
 def compare_table(records: list[dict], published: dict, models: list[str], profile: str) -> tuple[str, list[dict]]:
@@ -248,7 +299,7 @@ def compare_table(records: list[dict], published: dict, models: list[str], profi
     ordered = sorted(primary_records(records, profile), key=sort_key)
     for model in models:
         for record in (r for r in ordered if r["model"] == model):
-            pub = published_for(published, model, record["task"])
+            pub = published_for(published, model, record["task"], record["num_fewshot"])
             text, setting, diff = verdict(record, pub)
             outcomes.append({"model": model, "task": record["task"], "shots": record["num_fewshot"], "verdict": text,
                              "diff": diff, "record": record, "pub": pub})
@@ -261,16 +312,17 @@ def compare_table(records: list[dict], published: dict, models: list[str], profi
 
 def timing_table(data: dict, records: list[dict]) -> str:
     header = ["Model", "Profile", "Task", "Shots", "Items", "Wall clock"]
-    rows = []
-    for record in records:
-        if not record["primary"] or record.get("derived_from"):
-            continue
-        minutes = record["wall_clock_s"] / 60
-        rows.append([short(record["model"]), record["profile"], TASK_LABEL[record["task"]], str(record["num_fewshot"]),
-                     str(record["n_items"]), f"{minutes:.1f} min"])
-    totals = [[short(m), "**total**", "", "", " / ".join(f"{p}: {s / 60:.0f} min" for p, s in info["wall_clock_s"].items())]
-              for m, info in data["models"].items()]
-    return table(header, rows + totals)
+    profile_rank = {"mini": 0, "check": 1}
+    timed = [r for r in records if r["primary"] and not r.get("derived_from")]
+    timed.sort(key=lambda r: (MODEL_ORDER.index(r["model"]) if r["model"] in MODEL_ORDER else 99, profile_rank.get(r["profile"], 9),
+                              TASK_ORDER.index(r["task"]) if r["task"] in TASK_ORDER else 99, r["num_fewshot"]))
+    rows = [[short(r["model"]), r["profile"], TASK_LABEL[r["task"]], str(r["num_fewshot"]), str(r["n_items"]), f"{r['wall_clock_s'] / 60:.1f} min"]
+            for r in timed]
+    for model in models_in(records):
+        info = data["models"][model]
+        totals = " / ".join(f"{p}: {info['wall_clock_s'][p] / 60:.0f} min" for p in ("mini", "check") if p in info["wall_clock_s"])
+        rows.append([short(model), "**total**", "", "", "", totals])
+    return table(header, rows)
 
 
 def render_markdown(data: dict, published: dict) -> str:
@@ -281,6 +333,7 @@ def render_markdown(data: dict, published: dict) -> str:
 
     within = [o for o in check_outcomes if o["verdict"] == "within 2"]
     outside = [o for o in check_outcomes if o["verdict"] == "outside 2"]
+    differs = [o for o in check_outcomes if o["verdict"] == "setting differs"]
     unpublished = [o for o in check_outcomes if o["pub"] is None]
 
     def describe(o: dict) -> str:
@@ -288,9 +341,14 @@ def render_markdown(data: dict, published: dict) -> str:
         base = f"**{short(o['model'])} / {TASK_LABEL[o['task']]} ({o['shots']}-shot)**: {o['diff']:+.1f} points"
         return base + (f". {note}" if note else ".")
 
+    def unpublished_line(model: str) -> str:
+        tasks = ", ".join(f"{TASK_LABEL[o['task']]} ({o['shots']}-shot)" for o in unpublished if o["model"] == model)
+        return f"- **{short(model)}**: {tasks}."
+
     hardware = sorted({info["hardware"] for info in data["models"].values()})
     revisions = table(["Model", "Revision (commit)", "dtype", "Device"],
-                      [[short(m), f"`{info['model_revision']}`", info["dtype"], info["device"]] for m, info in data["models"].items()])
+                      [[short(m), f"`{data['models'][m]['model_revision']}`", data["models"][m]["dtype"], data["models"][m]["device"]]
+                       for m in models])
 
     parts = [
         "# compare_v0: eval_mini on three open base models",
@@ -323,23 +381,31 @@ def render_markdown(data: dict, published: dict) -> str:
         "",
         "## Within 2 points?",
         "",
-        f"Within {WITHIN_POINTS:.0f} points ({len(within)}):",
+        "Verdicts are given only where our shot count equals the publisher's. Rows with a different shot count are "
+        "listed separately: their difference measures the shot setting, not the harness.",
+        "",
+        f"Within {WITHIN_POINTS:.0f} points, same setting ({len(within)}):",
         "",
         *[f"- {describe(o)}" for o in within],
         "",
-        f"Outside {WITHIN_POINTS:.0f} points ({len(outside)}):",
+        f"Outside {WITHIN_POINTS:.0f} points, same setting ({len(outside)}):",
         "",
-        *[f"- {describe(o)}" for o in outside],
+        *([f"- {describe(o)}" for o in outside] or ["- none"]),
         "",
-        "No published score to compare against:",
+        f"Different setting, shown for the size of the effect ({len(differs)}):",
         "",
-        *[f"- **{short(o['model'])} / {TASK_LABEL[o['task']]} ({o['shots']}-shot)**: {NOTES.get((o['model'], o['task'], o['shots']), 'not published by the model authors.')}" for o in unpublished],
+        *[f"- {describe(o)}" for o in differs],
+        "",
+        "No published score in this setting:",
+        "",
+        *[unpublished_line(m) for m in models if any(o["model"] == m for o in unpublished)],
         "",
         *GENERAL_NOTES,
         "",
         "## Table 3: limited runs (profile `mini`) versus published, for reference only",
         "",
-        "With 200 items the standard error is 3–4 points, so a 2-point verdict here is noise. Shown to make the point.",
+        "With 200 to 570 items the standard error is 2 to 3.5 points, so a 2-point verdict here is mostly noise, and most "
+        "rows are in a different setting from the published number anyway. Shown to make that point.",
         "",
         mini_table,
         "",
@@ -350,6 +416,8 @@ def render_markdown(data: dict, published: dict) -> str:
         "## Hardware and wall-clock time",
         "",
         *[f"- {h}" for h in hardware],
+        f"- Run dates (UTC): {', '.join(sorted({d for info in data['models'].values() for d in info['run_dates']}))}. "
+        "Wall clock is per task, model loading excluded; one model ran at a time.",
         "",
         timing_table(data, records),
         "",

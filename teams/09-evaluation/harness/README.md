@@ -46,6 +46,31 @@ ARC-C 25-shot). The shot count is part of every record and of the raw output fil
 strings, 256 max generated tokens) are untouched, so a plain `lm_eval` command with the same task, shots and
 limit reproduces each number.
 
+## The v0 run (24 to 25 Oct 2026)
+
+Three ungated base models with published per-task numbers, all in bf16 at a pinned commit:
+
+| Model                        | Revision                                   | Published numbers used                      |
+|------------------------------|--------------------------------------------|---------------------------------------------|
+| `Qwen/Qwen2.5-0.5B`          | `060db6499f32faf8b98477b0a26969ef7d8b9987` | Qwen2.5 blog and technical report, sec. 5.1 |
+| `Qwen/Qwen2.5-1.5B`          | `8faed761d45a263340a0528343f099c05c9a4323` | same, plus the SmolLM2 card's re-evaluation |
+| `HuggingFaceTB/SmolLM2-1.7B` | `effd688a12921b4cc83e3312b6feb579f70f9c71` | SmolLM2-1.7B model card (lighteval)         |
+
+Llama-3.2-1B and Gemma-3-1B were not used: both repos are gated and need a Hugging Face token.
+
+Hardware: Apple M2 Pro, 32 GB unified memory, PyTorch MPS, bf16, batch size 8, one model at a time. Wall clock per
+model (model loading excluded; per-task times are in `../results/compare_v0.md`):
+
+| Model        | `mini` (5 tasks) | `check` (TruthfulQA, ARC-E, ARC-C, GSM8K, full) |
+|--------------|-----------------:|------------------------------------------------:|
+| Qwen2.5-0.5B |           10 min |                                          36 min |
+| Qwen2.5-1.5B |           20 min |                                          83 min |
+| SmolLM2-1.7B |           24 min |                                         116 min |
+
+GSM8K is the expensive task (1319 greedy generations); the multiple-choice full splits take 2 to 34 minutes each.
+On this machine bf16 runs about 1.6x slower than fp16 (the M2 has no hardware bf16); the baseline stays bf16 because
+that is what quantized models are compared against.
+
 ## Set-up
 
 ```bash
