@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""Merge ``runs/*/<profile>/summary.json`` into ``results/eval_mini_v0.json`` and render ``compare_v0.md``.
+
+    python teams/09-evaluation/harness/build_results.py            # default paths
+    python teams/09-evaluation/harness/build_results.py --runs-dir teams/09-evaluation/harness/runs
+
+The JSON is the artefact other teams diff against; its field names are documented in FIELD_DOCS and in the
+README. The markdown is derived from the same records plus ``published_scores.json`` and the NOTES below.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dataclasses import asdict  # noqa: E402
+
+from run_eval_mini import PROFILES, SCHEMA_VERSION, TASKS  # noqa: E402
+
+HARNESS_DIR = Path(__file__).resolve().parent
+RESULTS_DIR = HARNESS_DIR.parent / "results"
+WITHIN_POINTS = 2.0
+
+MODEL_ORDER = ["Qwen/Qwen2.5-0.5B", "Qwen/Qwen2.5-1.5B", "HuggingFaceTB/SmolLM2-1.7B"]
+TASK_ORDER = ["arc_challenge", "arc_easy", "arc_average", "hellaswag", "mmlu", "gsm8k", "truthfulqa_mc2"]
+TASK_LABEL = {
+    "arc_challenge": "ARC-Challenge",
+    "arc_easy": "ARC-Easy",
+    "arc_average": "ARC (Easy+Challenge avg)",
+    "hellaswag": "HellaSwag",
+    "mmlu": "MMLU",
+    "gsm8k": "GSM8K",
+    "truthfulqa_mc2": "TruthfulQA (mc2)",
+}
+
+FIELD_DOCS = {
+    "model": "Hugging Face model id as evaluated",
+    "model_revision": "commit sha of the model repository that was loaded (pinned with revision=)",
+    "dtype": "torch dtype the weights were loaded in (bfloat16 for the baseline)",
+    "task": "lm_eval task name; 'mmlu' is the 57-subject group aggregate",
+    "profile": "'mini' = limited run of all five tasks; 'check' = full evaluation split of a task",
+    "metric": "lm_eval metric name (acc, acc_norm, exact_match)",
+    "filter": "lm_eval answer filter ('none' for multiple choice; 'strict-match' / 'flexible-extract' for GSM8K)",
+    "value": "metric value as the harness reports it, a fraction in [0, 1]; multiply by 100 for the tables",
+    "stderr": "standard error of the value, same scale as value (null if the harness gives none)",
+    "n_items": "number of evaluation items actually scored (after the limit)",
+    "n_items_total": "size of the full evaluation split",
+    "num_fewshot": "few-shot examples in the prompt, as the harness reports it",
+    "primary": "true for the one (metric, filter) per task that compare_v0.md uses",
+    "task_version": "lm_eval task config version",
+    "limit": "items per task requested (per subject for mmlu); null = full split",
+    "seed": "seed for random, numpy, torch and few-shot sampling",
+    "harness_version": "lm_eval package version",
+    "run_date": "UTC date of the run",
+    "device": "torch device string",
+    "hardware": "chip or GPU the run used",
+    "batch_size": "lm_eval batch size",
+    "wall_clock_s": "seconds for this task (model loading excluded)",
+}
+
+# Hand-written reasons for compare_v0.md, keyed by (model, task, shots). Keep them short and factual.
+NOTES: dict[tuple[str, str, int], str] = {}
+GENERAL_NOTES: list[str] = []
+
+# What the limited mini-profile table (Table 3) does and does not say. Rendered under it.
+MINI_NOTES: list[str] = [
+    "TruthfulQA mc2 lands within 0.1 point of Qwen's published value for both Qwen models even at 200 items, so the "
+    "metric variant (mc2) and the fixed lm_eval prompt agree with what Qwen reports.",
+    "ARC-Challenge and HellaSwag are 0-shot here against 25-shot and 10-shot published numbers. Shots help small base "
+    "models a great deal on these tasks (Qwen2.5-1.5B is 10.7 points under its 25-shot ARC-C figure), so these rows "
+    "measure the shot setting, not the harness. The check profile has the matched-setting runs.",
+    "MMLU here is 0-shot on the first 10 items of each subject, so every subject weighs the same; the published 5-shot "
+    "numbers are on the full test set, where large subjects dominate. The two are not comparable in either direction.",
+    "GSM8K: our 5-shot score for Qwen2.5-1.5B (61.5) matches the SmolLM2 card's independent lighteval 5-shot run of the "
+    "same model (61.3). Qwen's own 68.5 is 4-shot with its own prompt and answer extraction. The 4-shot full run in the "
+    "check profile isolates the shot effect; the rest is prompt format.",
+    "HellaSwag on the first 400 validation items runs about 6.5 points under the full-split figure for both SmolLM2-1.7B "
+    "(62.0 vs 68.7) and Qwen2.5-1.5B (60.0 vs the 66.4 the SmolLM2 card measured): the subset is harder than the whole "
+    "split for every model, which is exactly why a limited run is for relative comparisons only.",
+]
+
+
+def load_summaries(runs_dir: Path) -> list[dict]:
+    summaries = []
+    for path in sorted(runs_dir.glob("*/*/summary.json")):
+        if path.relative_to(runs_dir).parts[0].startswith("smoke"):
+            continue  # smoke-test directories directly under runs/ are not results
+        with path.open() as fh:
+            summaries.append(json.load(fh))
+    if not summaries:
+        raise SystemExit(f"no summary.json under {runs_dir}; run run_eval_mini.py first")
+    return summaries
+
+
+def load_published(path: Path) -> dict:
+    with path.open() as fh:
+        return json.load(fh)
+
+
+def sort_key(record: dict) -> tuple:
+    model_rank = MODEL_ORDER.index(record["model"]) if record["model"] in MODEL_ORDER else len(MODEL_ORDER)
+    task_rank = TASK_ORDER.index(record["task"]) if record["task"] in TASK_ORDER else len(TASK_ORDER)
+    return (model_rank, record["model"], record["profile"], task_rank, record["metric"], record["filter"])
+
+
+def build_json(summaries: list[dict], published: dict) -> dict:
+    raw = [record for summary in summaries for record in summary["records"]]
+    records = sorted(raw + derive_arc_average(raw), key=sort_key)
+    models: dict[str, dict] = {}
+    for summary in summaries:
+        meta = summary["run_meta"]
+        entry = models.setdefault(
+            meta["model"],
+            {"model_revision": meta["model_revision"], "dtype": meta["dtype"], "device": meta["device"],
+             "hardware": meta["hardware"], "batch_size": meta["batch_size"], "seed": meta["seed"],
+             "versions": meta["versions"], "wall_clock_s": {}, "run_dates": []},
+        )
+        profile_seconds = sum(r["wall_clock_s"] for r in summary["records"] if r["primary"] and not r.get("derived_from"))
+        entry["wall_clock_s"][meta["profile"]] = round(profile_seconds, 1)
+        entry["run_dates"] = sorted({*entry["run_dates"], *{r["run_date"] for r in summary["records"]}})
+    versions = next(iter(models.values()))["versions"]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "description": "G9 eval_mini v0: lm-evaluation-harness scores of three open base models in bf16. "
+                       "Baseline for Team 12 (quantization) and for the within-2-points check against published scores.",
+        "harness": {"name": "lm-evaluation-harness", "package": "lm_eval", **versions},
+        "task_set": {name: {"primary_metric": spec.primary_metric, "primary_filter": spec.primary_filter}
+                     for name, spec in TASKS.items()},
+        "profiles": {profile: {task: asdict(run) for task, run in runs.items()} for profile, runs in PROFILES.items()},
+        "models": models,
+        "published_scores_file": "teams/09-evaluation/harness/published_scores.json",
+        "field_docs": FIELD_DOCS,
+        "records": records,
+    }
+
+
+def derive_arc_average(records: list[dict]) -> list[dict]:
+    """SmolLM2 publishes 'ARC (Average)': the mean of ARC-Easy and ARC-Challenge. Derive it where both ran
+    with the same model, profile, shots and metric. stderr assumes the two halves are independent."""
+    by_key: dict[tuple, dict[str, dict]] = defaultdict(dict)
+    for record in records:
+        if record["task"] in ("arc_easy", "arc_challenge"):
+            by_key[(record["model"], record["profile"], record["num_fewshot"], record["metric"], record["filter"])][record["task"]] = record
+    derived = []
+    for key, halves in by_key.items():
+        if len(halves) != 2:
+            continue
+        easy, hard = halves["arc_easy"], halves["arc_challenge"]
+        stderr = None if easy["stderr"] is None or hard["stderr"] is None else (easy["stderr"] ** 2 + hard["stderr"] ** 2) ** 0.5 / 2
+        derived.append({
+            **hard,
+            "task": "arc_average",
+            "value": (easy["value"] + hard["value"]) / 2,
+            "stderr": stderr,
+            "n_items": easy["n_items"] + hard["n_items"],
+            "n_items_total": easy["n_items_total"] + hard["n_items_total"],
+            "wall_clock_s": round(easy["wall_clock_s"] + hard["wall_clock_s"], 1),
+            "primary": hard["primary"],
+            "derived_from": ["arc_easy", "arc_challenge"],
+        })
+    return derived
+
+
+def profile_sentence(profile: str) -> str:
+    parts = []
+    for task, run in PROFILES[profile].items():
+        items = "full split" if run.limit is None else (f"{run.limit} per subject" if task == "mmlu" else f"{run.limit} items")
+        parts.append(f"{TASK_LABEL[task]} {run.num_fewshot}-shot, {items}")
+    return f"Profile `{profile}`: " + "; ".join(parts) + "."
+
+
+def pct(value: float | None, digits: int = 1) -> str:
+    return "n/a" if value is None else f"{100 * value:.{digits}f}"
+
+
+def cell(record: dict | None) -> str:
+    if record is None:
+        return "–"
+    err = "" if record["stderr"] is None else f" ±{100 * record['stderr']:.1f}"
+    return f"{pct(record['value'])}{err} (n={record['n_items']})"
+
+
+def primary_index(records: list[dict]) -> dict[tuple[str, str, str, int], dict]:
+    return {(r["model"], r["profile"], r["task"], r["num_fewshot"]): r for r in records if r["primary"]}
+
+
+def primary_records(records: list[dict], profile: str) -> list[dict]:
+    return [r for r in records if r["primary"] and r["profile"] == profile]
+
+
+def models_in(records: list[dict]) -> list[str]:
+    present = {r["model"] for r in records}
+    return [m for m in MODEL_ORDER if m in present] + sorted(present - set(MODEL_ORDER))
+
+
+def short(model: str) -> str:
+    return model.split("/")[-1]
+
+
+def table(header: list[str], rows: list[list[str]]) -> str:
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
+    lines += ["| " + " | ".join(row) + " |" for row in rows]
+    return "\n".join(lines)
+
+
+def scores_table(records: list[dict], models: list[str], profile: str) -> str:
+    header = ["Task", "Shots", "Metric"] + [short(m) for m in models]
+    index = primary_index(records)
+    combos = sorted({(r["task"], r["num_fewshot"]) for r in primary_records(records, profile)},
+                    key=lambda c: (TASK_ORDER.index(c[0]) if c[0] in TASK_ORDER else 99, c[1]))
+    rows = []
+    for task, shots in combos:
+        spec = TASKS[task] if task in TASKS else TASKS["arc_challenge"]
+        metric = spec.primary_metric if spec.primary_filter == "none" else f"{spec.primary_metric} ({spec.primary_filter})"
+        rows.append([TASK_LABEL[task], str(shots), metric] + [cell(index.get((m, profile, task, shots))) for m in models])
+    return table(header, rows)
+
+
+def published_for(published: dict, model: str, task: str) -> dict | None:
+    return published["models"].get(model, {}).get("scores", {}).get(task)
+
+
+def verdict(record: dict, pub: dict | None) -> tuple[str, str, float | None]:
+    """(verdict text, setting note, diff in points) for one of our records against a published score."""
+    if pub is None:
+        return "no published score", "", None
+    diff = 100 * record["value"] - pub["value"]
+    notes = []
+    if pub.get("shots") is not None and pub["shots"] != record["num_fewshot"]:
+        notes.append(f"shots {record['num_fewshot']} vs {pub['shots']} published")
+    if record["limit"] is not None:
+        notes.append(f"limited run (n={record['n_items']})")
+    if pub.get("metric") is None:
+        notes.append("published metric variant not stated")
+    within = abs(diff) <= WITHIN_POINTS
+    return ("within 2" if within else "outside 2"), "; ".join(notes), diff
+
+
+def compare_table(records: list[dict], published: dict, models: list[str], profile: str) -> tuple[str, list[dict]]:
+    header = ["Model", "Task", "Shots", "Ours (%)", "Published (%)", "Diff (pts)", "Verdict", "Setting notes"]
+    rows, outcomes = [], []
+    ordered = sorted(primary_records(records, profile), key=sort_key)
+    for model in models:
+        for record in (r for r in ordered if r["model"] == model):
+            pub = published_for(published, model, record["task"])
+            text, setting, diff = verdict(record, pub)
+            outcomes.append({"model": model, "task": record["task"], "shots": record["num_fewshot"], "verdict": text,
+                             "diff": diff, "record": record, "pub": pub})
+            pub_cell = "–" if pub is None else f"{pub['value']:.1f} ({pub['shots']}-shot)"
+            diff_cell = "–" if diff is None else f"{diff:+.1f}"
+            rows.append([short(model), TASK_LABEL[record["task"]], str(record["num_fewshot"]), cell(record), pub_cell,
+                         diff_cell, text, setting or "–"])
+    return table(header, rows), outcomes
+
+
+def timing_table(data: dict, records: list[dict]) -> str:
+    header = ["Model", "Profile", "Task", "Shots", "Items", "Wall clock"]
+    rows = []
+    for record in records:
+        if not record["primary"] or record.get("derived_from"):
+            continue
+        minutes = record["wall_clock_s"] / 60
+        rows.append([short(record["model"]), record["profile"], TASK_LABEL[record["task"]], str(record["num_fewshot"]),
+                     str(record["n_items"]), f"{minutes:.1f} min"])
+    totals = [[short(m), "**total**", "", "", " / ".join(f"{p}: {s / 60:.0f} min" for p, s in info["wall_clock_s"].items())]
+              for m, info in data["models"].items()]
+    return table(header, rows + totals)
+
+
+def render_markdown(data: dict, published: dict) -> str:
+    records = data["records"]
+    models = models_in(records)
+    check_table, check_outcomes = compare_table(records, published, models, "check")
+    mini_table, _ = compare_table(records, published, models, "mini")
+
+    within = [o for o in check_outcomes if o["verdict"] == "within 2"]
+    outside = [o for o in check_outcomes if o["verdict"] == "outside 2"]
+    unpublished = [o for o in check_outcomes if o["pub"] is None]
+
+    def describe(o: dict) -> str:
+        note = NOTES.get((o["model"], o["task"], o["shots"]))
+        base = f"**{short(o['model'])} / {TASK_LABEL[o['task']]} ({o['shots']}-shot)**: {o['diff']:+.1f} points"
+        return base + (f". {note}" if note else ".")
+
+    hardware = sorted({info["hardware"] for info in data["models"].values()})
+    revisions = table(["Model", "Revision (commit)", "dtype", "Device"],
+                      [[short(m), f"`{info['model_revision']}`", info["dtype"], info["device"]] for m, info in data["models"].items()])
+
+    parts = [
+        "# compare_v0: eval_mini on three open base models",
+        "",
+        f"Generated by `teams/09-evaluation/harness/build_results.py` from `eval_mini_v0.json` on {data['generated_at'][:10]}. "
+        f"Harness: lm-evaluation-harness {data['harness']['lm_eval']} (torch {data['harness']['torch']}, transformers {data['harness']['transformers']}). "
+        f"Seed {next(iter(data['models'].values()))['seed']}, batch size {next(iter(data['models'].values()))['batch_size']}, "
+        "greedy decoding for GSM8K. Scores are percentages; ± is one standard error; n is the number of items scored.",
+        "",
+        "## Models",
+        "",
+        revisions,
+        "",
+        "## Table 1: eval_mini (profile `mini`, limited runs)",
+        "",
+        "Same five tasks, same shots, same first-n items for every model. " + profile_sentence("mini") + " "
+        "Multiple-choice tasks run 0-shot so that a laptop GPU can afford hundreds of items per task; this is the cheap "
+        "profile Team 12 should rerun on quantized models and diff against the baseline.",
+        "",
+        scores_table(records, models, "mini"),
+        "",
+        "## Table 2: full runs (profile `check`) versus published scores",
+        "",
+        "Full evaluation splits in the publishers' settings, so the standard error is about 1 to 1.7 points and a "
+        "2-point comparison is meaningful. "
+        "Published values: Qwen2.5 blog and technical report (section 5.1); SmolLM2-1.7B model card. "
+        "See `published_scores.json` for sources and the shot counts each publisher states.",
+        "",
+        check_table,
+        "",
+        "## Within 2 points?",
+        "",
+        f"Within {WITHIN_POINTS:.0f} points ({len(within)}):",
+        "",
+        *[f"- {describe(o)}" for o in within],
+        "",
+        f"Outside {WITHIN_POINTS:.0f} points ({len(outside)}):",
+        "",
+        *[f"- {describe(o)}" for o in outside],
+        "",
+        "No published score to compare against:",
+        "",
+        *[f"- **{short(o['model'])} / {TASK_LABEL[o['task']]} ({o['shots']}-shot)**: {NOTES.get((o['model'], o['task'], o['shots']), 'not published by the model authors.')}" for o in unpublished],
+        "",
+        *GENERAL_NOTES,
+        "",
+        "## Table 3: limited runs (profile `mini`) versus published, for reference only",
+        "",
+        "With 200 items the standard error is 3–4 points, so a 2-point verdict here is noise. Shown to make the point.",
+        "",
+        mini_table,
+        "",
+        "Reading this table:",
+        "",
+        *[f"- {note}" for note in MINI_NOTES],
+        "",
+        "## Hardware and wall-clock time",
+        "",
+        *[f"- {h}" for h in hardware],
+        "",
+        timing_table(data, records),
+        "",
+    ]
+    return "\n".join(parts)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--runs-dir", type=Path, default=HARNESS_DIR / "runs")
+    parser.add_argument("--published", type=Path, default=HARNESS_DIR / "published_scores.json")
+    parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
+    args = parser.parse_args(argv)
+
+    summaries = load_summaries(args.runs_dir)
+    published = load_published(args.published)
+    data = build_json(summaries, published)
+    args.results_dir.mkdir(parents=True, exist_ok=True)
+    json_path = args.results_dir / "eval_mini_v0.json"
+    md_path = args.results_dir / "compare_v0.md"
+    with json_path.open("w") as fh:
+        json.dump(data, fh, indent=1)
+        fh.write("\n")
+    md_path.write_text(render_markdown(data, published))
+    print(f"wrote {json_path} ({len(data['records'])} records) and {md_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
