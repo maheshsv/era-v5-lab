@@ -29,13 +29,17 @@ Full evaluation splits in the publishers' settings, so the standard error is abo
 | Model | Task | Shots | Ours (%) | Published (%) | Diff (pts) | Verdict | Setting notes |
 |---|---|---|---|---|---|---|---|
 | Qwen2.5-0.5B | ARC-Challenge | 0 | 32.2 ±1.4 (n=1172) | 35.6 (25-shot) | -3.4 | setting differs | shots 0 vs 25 published; metric variant not stated by publisher |
+| Qwen2.5-0.5B | ARC-Challenge | 25 | 35.8 ±1.4 (n=1172) | 35.6 (25-shot) | +0.2 | within 2 | metric variant not stated by publisher |
 | Qwen2.5-0.5B | ARC-Easy | 0 | 58.5 ±1.0 (n=2376) | – | – | no published score | – |
 | Qwen2.5-0.5B | ARC (Easy+Challenge avg) | 0 | 45.4 ±0.8 (n=3548) | – | – | no published score | – |
+| Qwen2.5-0.5B | GSM8K | 4 | 34.6 ±1.3 (n=1319) | 41.6 (4-shot) | -7.0 | outside 2 | metric variant not stated by publisher |
 | Qwen2.5-0.5B | GSM8K | 5 | 33.0 ±1.3 (n=1319) | 41.6 (4-shot) | -8.6 | setting differs | shots 5 vs 4 published; metric variant not stated by publisher |
 | Qwen2.5-0.5B | TruthfulQA (mc2) | 0 | 39.9 ±1.4 (n=817) | 40.2 (0-shot) | -0.3 | within 2 | metric variant not stated by publisher |
 | Qwen2.5-1.5B | ARC-Challenge | 0 | 45.2 ±1.5 (n=1172) | 54.7 (25-shot) | -9.5 | setting differs | shots 0 vs 25 published; metric variant not stated by publisher |
+| Qwen2.5-1.5B | ARC-Challenge | 25 | 55.0 ±1.5 (n=1172) | 54.7 (25-shot) | +0.3 | within 2 | metric variant not stated by publisher |
 | Qwen2.5-1.5B | ARC-Easy | 0 | 71.8 ±0.9 (n=2376) | – | – | no published score | – |
 | Qwen2.5-1.5B | ARC (Easy+Challenge avg) | 0 | 58.5 ±0.9 (n=3548) | 58.5 (0-shot) | +0.0 | within 2 | measured by the SmolLM2 model card (lighteval), not by the model authors; metric variant not stated by publisher |
+| Qwen2.5-1.5B | GSM8K | 4 | 62.1 ±1.3 (n=1319) | 68.5 (4-shot) | -6.4 | outside 2 | metric variant not stated by publisher |
 | Qwen2.5-1.5B | GSM8K | 5 | 62.8 ±1.3 (n=1319) | 61.3 (5-shot) | +1.5 | within 2 | measured by the SmolLM2 model card (lighteval), not by the model authors; metric variant not stated by publisher |
 | Qwen2.5-1.5B | TruthfulQA (mc2) | 0 | 46.6 ±1.5 (n=817) | 46.6 (0-shot) | -0.0 | within 2 | metric variant not stated by publisher |
 | SmolLM2-1.7B | ARC-Challenge | 0 | 47.4 ±1.5 (n=1172) | – | – | no published score | – |
@@ -48,24 +52,27 @@ Full evaluation splits in the publishers' settings, so the standard error is abo
 
 Verdicts are given only where our shot count equals the publisher's. Rows with a different shot count are listed separately: their difference measures the shot setting, not the harness.
 
-Within 2 points, same setting (6):
+Within 2 points, same setting (8):
 
+- **Qwen2.5-0.5B / ARC-Challenge (25-shot)**: +0.2 points. same 25-shot setting as Qwen's report (few-shot exemplars sampled from the ARC train split with seed 42)
 - **Qwen2.5-0.5B / TruthfulQA (mc2) (0-shot)**: -0.3 points. lm_eval's fixed 6-example QA prompt and the mc2 metric reproduce Qwen's figure on the full 817 questions
+- **Qwen2.5-1.5B / ARC-Challenge (25-shot)**: +0.3 points. same 25-shot setting as Qwen's report (few-shot exemplars sampled from the ARC train split with seed 42)
 - **Qwen2.5-1.5B / ARC (Easy+Challenge avg) (0-shot)**: +0.0 points. against the SmolLM2 card's own lighteval run of this model (58.5); Qwen does not publish 0-shot ARC
 - **Qwen2.5-1.5B / GSM8K (5-shot)**: +1.5 points. against the SmolLM2 card's lighteval 5-shot run of this model (61.3); Qwen itself publishes 4-shot only (68.5, see the 4-shot row)
 - **Qwen2.5-1.5B / TruthfulQA (mc2) (0-shot)**: -0.0 points. same prompt and metric; the match to one decimal on both Qwen models says Qwen reports mc2 with this prompt
 - **SmolLM2-1.7B / ARC (Easy+Challenge avg) (0-shot)**: -0.2 points. mean of ARC-Easy 73.3 and ARC-Challenge 47.4 (acc_norm); lighteval (card) and lm_eval agree
 - **SmolLM2-1.7B / GSM8K (5-shot)**: -0.7 points. same 5-shot setting as the card; lm_eval's Question/Answer prompt with flexible-extract reproduces the lighteval figure within one standard error
 
-Outside 2 points, same setting (0):
+Outside 2 points, same setting (2):
 
-- none
+- **Qwen2.5-0.5B / GSM8K (4-shot)**: -7.0 points. same shot count as Qwen's report and still 7 points under it. Going from 5 to 4 shots moved this model by +1.6 (33.0 to 34.6), so the rest is prompt format: lm_eval uses a plain 'Question: / Answer:' prompt with random train exemplars and extracts the last number, while Qwen's 4-shot prompt and extraction are not published. Two independent harnesses, lm_eval here and lighteval on the SmolLM2 card, agree with each other on these models and not with Qwen's figure, so this is a prompt-format gap on the publisher's side, not a defect of this run
+- **Qwen2.5-1.5B / GSM8K (4-shot)**: -6.4 points. same shot count as Qwen's report; see the 0.5B row for why the gap is prompt format. The lighteval 5-shot figure on the SmolLM2 card (61.3) is the harness-measured reference for this model
 
 Different setting, shown for the size of the effect (3):
 
 - **Qwen2.5-0.5B / ARC-Challenge (0-shot)**: -3.4 points. 0-shot here versus Qwen's 25-shot. The 25-shot full run on this model is the matched comparison (see its row)
 - **Qwen2.5-0.5B / GSM8K (5-shot)**: -8.6 points. 5-shot here versus Qwen's 4-shot; strict-match (32.4) and flexible-extract (33.0) agree, so the answer format is followed. The 4-shot full run on this model is the matched comparison (see its row)
-- **Qwen2.5-1.5B / ARC-Challenge (0-shot)**: -9.5 points. 0-shot here versus Qwen's 25-shot; 25 shots are worth about 9 points to this model. A 25-shot full run on the 1.5B is ~4 h on the M2 Pro and was not done; it is one `--num-fewshot 25` call on a CUDA GPU
+- **Qwen2.5-1.5B / ARC-Challenge (0-shot)**: -9.5 points. 0-shot here versus Qwen's 25-shot. The 25-shot full run on this model is the matched comparison (see its row)
 
 No published score in this setting:
 
@@ -73,6 +80,7 @@ No published score in this setting:
 - **Qwen2.5-1.5B**: ARC-Easy (0-shot).
 - **SmolLM2-1.7B**: ARC-Challenge (0-shot), ARC-Easy (0-shot), TruthfulQA (mc2) (0-shot).
 
+What this means for the Sat 31 Oct gate: the within-2-points check is meaningful where the prompt is fixed by the task (TruthfulQA) or the task is scored by log-likelihood over the given choices (ARC, HellaSwag, MMLU), and where the shot count matches. For generation tasks such as GSM8K the number depends on the prompt family and on the publisher's answer extraction, which model cards rarely state; there the reference to beat should be a harness-measured figure (the SmolLM2 card's lighteval column, or an Open LLM Leaderboard run), not the model authors' own table.
 
 ## Table 3: limited runs (profile `mini`) versus published, for reference only
 
@@ -117,7 +125,9 @@ Reading this table:
 | Qwen2.5-0.5B | mini | GSM8K | 5 | 200 | 3.9 min |
 | Qwen2.5-0.5B | mini | TruthfulQA (mc2) | 0 | 200 | 1.9 min |
 | Qwen2.5-0.5B | check | ARC-Challenge | 0 | 1172 | 1.5 min |
+| Qwen2.5-0.5B | check | ARC-Challenge | 25 | 1172 | 26.2 min |
 | Qwen2.5-0.5B | check | ARC-Easy | 0 | 2376 | 2.6 min |
+| Qwen2.5-0.5B | check | GSM8K | 4 | 1319 | 22.2 min |
 | Qwen2.5-0.5B | check | GSM8K | 5 | 1319 | 24.3 min |
 | Qwen2.5-0.5B | check | TruthfulQA (mc2) | 0 | 817 | 7.2 min |
 | Qwen2.5-1.5B | mini | ARC-Challenge | 0 | 500 | 1.7 min |
@@ -126,7 +136,9 @@ Reading this table:
 | Qwen2.5-1.5B | mini | GSM8K | 5 | 200 | 8.4 min |
 | Qwen2.5-1.5B | mini | TruthfulQA (mc2) | 0 | 200 | 5.0 min |
 | Qwen2.5-1.5B | check | ARC-Challenge | 0 | 1172 | 3.5 min |
+| Qwen2.5-1.5B | check | ARC-Challenge | 25 | 1172 | 74.9 min |
 | Qwen2.5-1.5B | check | ARC-Easy | 0 | 2376 | 5.7 min |
+| Qwen2.5-1.5B | check | GSM8K | 4 | 1319 | 45.1 min |
 | Qwen2.5-1.5B | check | GSM8K | 5 | 1319 | 54.1 min |
 | Qwen2.5-1.5B | check | TruthfulQA (mc2) | 0 | 817 | 19.7 min |
 | SmolLM2-1.7B | mini | ARC-Challenge | 0 | 500 | 1.8 min |
@@ -138,6 +150,6 @@ Reading this table:
 | SmolLM2-1.7B | check | ARC-Easy | 0 | 2376 | 6.2 min |
 | SmolLM2-1.7B | check | GSM8K | 5 | 1319 | 72.2 min |
 | SmolLM2-1.7B | check | TruthfulQA (mc2) | 0 | 817 | 33.9 min |
-| Qwen2.5-0.5B | **total** |  |  |  | mini: 10 min / check: 36 min |
-| Qwen2.5-1.5B | **total** |  |  |  | mini: 20 min / check: 83 min |
+| Qwen2.5-0.5B | **total** |  |  |  | mini: 10 min / check: 84 min |
+| Qwen2.5-1.5B | **total** |  |  |  | mini: 20 min / check: 203 min |
 | SmolLM2-1.7B | **total** |  |  |  | mini: 24 min / check: 116 min |

@@ -34,9 +34,9 @@ items instead of shots. GSM8K keeps 5 shots because base models need the format 
 0-shot ARC and HellaSwag are also exactly what the SmolLM2 card reports.
 
 Why these `check` tasks: full TruthfulQA, GSM8K and 0-shot ARC are the full-split runs an M2 Pro can finish in
-under an hour per model. Full 25-shot ARC-C (~7M prompt tokens) was affordable only for the 0.5B model, and full
-10-shot HellaSwag or 5-shot MMLU (36M and 45M tokens) not at all; on a CUDA GPU they are a `--tasks ... --num-fewshot`
-call away and the records slot into the same JSON.
+under an hour per model (GSM8K: up to 72 min for the 1.7B). Full 25-shot ARC-C (~7M prompt tokens) was run for the
+two Qwen models (26 and 75 min); full 10-shot HellaSwag or 5-shot MMLU (36M and 45M tokens) were not
+affordable; on a CUDA GPU they are a `--tasks ... --num-fewshot` call away and the records slot into the same JSON.
 
 `--num-fewshot k` overrides the shot count for one call (used for GSM8K 4-shot, the Qwen2.5 report's setting, and
 ARC-C 25-shot). The shot count is part of every record and of the raw output file name, so variants never collide.
@@ -61,11 +61,11 @@ Llama-3.2-1B and Gemma-3-1B were not used: both repos are gated and need a Huggi
 Hardware: Apple M2 Pro, 32 GB unified memory, PyTorch MPS, bf16, batch size 8, one model at a time. Wall clock per
 model (model loading excluded; per-task times are in `../results/compare_v0.md`):
 
-| Model        | `mini` (5 tasks) | `check` (TruthfulQA, ARC-E, ARC-C, GSM8K, full) |
-|--------------|-----------------:|------------------------------------------------:|
-| Qwen2.5-0.5B |           10 min |                                          36 min |
-| Qwen2.5-1.5B |           20 min |                                          83 min |
-| SmolLM2-1.7B |           24 min |                                         116 min |
+| Model        | `mini` (5 tasks) | `check` (full TruthfulQA, ARC-E, ARC-C 0-shot, GSM8K 5-shot) | extra `check` runs (GSM8K 4-shot, ARC-C 25-shot) |
+|--------------|-----------------:|-------------------------------------------------------------:|-------------------------------------------------:|
+| Qwen2.5-0.5B |           10 min |                                                       36 min |                                           48 min |
+| Qwen2.5-1.5B |           20 min |                                                       83 min |                                          120 min |
+| SmolLM2-1.7B |           24 min |                                                      116 min |                                                – |
 
 GSM8K is the expensive task (1319 greedy generations); the multiple-choice full splits take 2 to 34 minutes each.
 On this machine bf16 runs about 1.6x slower than fp16 (the M2 has no hardware bf16); the baseline stays bf16 because

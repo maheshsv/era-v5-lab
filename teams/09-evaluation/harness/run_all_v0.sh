@@ -4,7 +4,7 @@
 #   caffeinate -i bash teams/09-evaluation/harness/run_all_v0.sh 2>&1 | tee -a teams/09-evaluation/harness/runs/run_all_v0.log
 #   .venv/bin/python teams/09-evaluation/harness/build_results.py
 # Stages are ordered so the most useful results land first; stop after any stage and rebuild.
-# Approximate wall clock on the M2 Pro: stage 1 ~45 min, stage 2 ~70 min, stage 3 ~2 h, stage 4 ~75 min, stage 5 ~75 min.
+# Wall clock on the M2 Pro: stage 1 ~55 min, stage 2 ~85 min, stage 3 ~2.5 h, stage 4 ~70 min, stage 5 ~100 min.
 set -euo pipefail
 PY=${PY:-.venv/bin/python}
 RUN="$PY teams/09-evaluation/harness/run_eval_mini.py"
@@ -22,7 +22,7 @@ for m in "${MODELS[@]}"; do $RUN --model "$m" --profile check --tasks gsm8k; don
 echo "== stage 4: full GSM8K 4-shot, the Qwen2.5 report's setting, for the two Qwen models"
 for m in "Qwen/Qwen2.5-0.5B" "Qwen/Qwen2.5-1.5B"; do $RUN --model "$m" --profile check --tasks gsm8k --num-fewshot 4; done
 
-echo "== stage 5: full ARC-Challenge 25-shot (Qwen2.5 report's setting); affordable only for the 0.5B model on MPS"
-$RUN --model "Qwen/Qwen2.5-0.5B" --profile check --tasks arc_challenge --num-fewshot 25
+echo "== stage 5: full ARC-Challenge 25-shot, the Qwen2.5 report's setting, for the two Qwen models (~26 min and ~1 h on MPS)"
+for m in "Qwen/Qwen2.5-0.5B" "Qwen/Qwen2.5-1.5B"; do $RUN --model "$m" --profile check --tasks arc_challenge --num-fewshot 25; done
 
 echo "== done"
